@@ -1936,14 +1936,22 @@ def analyze_ic_pinouts(ctx: AnalysisContext) -> list[dict]:
             net_name, net_info = pin_net.get(pin_key, (None, None))
 
             # Check if pin has a no-connect marker (by position, net flag, or
-            # library-defined NC pin type)
+            # library-defined NC pin type).
             pin_pos = (ic.get("_sheet", 0),
                        round(pin["x"] / EPSILON) * EPSILON,
                        round(pin["y"] / EPSILON) * EPSILON)
+            # The net-level no_connect flag is set when *any* point in a net's
+            # union-find group is an NC marker (extract_nets line ~1490). On a
+            # genuinely-connected multi-pin net it must NOT mark every pin as
+            # NO_CONNECT — e.g. a stray NC marker absorbed into VBUS/GND would
+            # otherwise flip all of that rail's IC pins to NO_CONNECT. Only honor
+            # the net flag for single-pin nets, which covers the real case where
+            # the marker sits on a short wire stub rather than exactly on the pin.
+            net_pin_count = len(net_info.get("pins", [])) if net_info else 0
             has_no_connect = (
                 pin_pos in nc_positions
-                or bool(net_info and net_info.get("no_connect"))
                 or pin.get("type") in ("no_connect", "unconnected")
+                or bool(net_info and net_info.get("no_connect") and net_pin_count <= 1)
             )
 
             # Get components sharing this net
