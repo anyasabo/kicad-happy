@@ -167,6 +167,7 @@ LDO_SPECS = {
     # TI — low-Iq
     "TPS7A02":  {"vref": 0.5,  "dropout_mv": 200,  "iq_ua": 0.025, "iout_max_ma": 50},
     "LP5907":   {"vref": 0.5,  "dropout_mv": 120,  "iq_ua": 12,    "iout_max_ma": 250},
+    "TLV733":   {"vref": 3.3,  "dropout_mv": 170,  "iq_ua": 16,    "iout_max_ma": 300, "fixed": True},
     "TLV755":   {"vref": 0.6,  "dropout_mv": 200,  "iq_ua": 12,    "iout_max_ma": 500},
     "TPS709":   {"vref": 1.15, "dropout_mv": 300,  "iq_ua": 1,     "iout_max_ma": 150},
     "LP2985":   {"vref": 1.25, "dropout_mv": 280,  "iq_ua": 400,   "iout_max_ma": 150},

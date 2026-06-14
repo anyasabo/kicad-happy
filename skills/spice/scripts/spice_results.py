@@ -765,6 +765,74 @@ def evaluate_regulator_feedback(det, sim_results):
     return result
 
 
+def evaluate_ldo_regulation(det, sim_results):
+    """Evaluate LDO load-step transient simulation results.
+
+    Checks output voltage accuracy and droop during load transient.
+    """
+    ref = det.get("ref", "?")
+    mpn = det.get("value", "?")
+
+    vout_target = float(sim_results.get("vout_target", 0))
+    dropout_v = float(sim_results.get("dropout_v", 0.3))
+
+    vout_pre = sim_results.get("vout_pre")
+    vout_min = sim_results.get("vout_min")
+    vout_final = sim_results.get("vout_final")
+
+    result = {
+        "subcircuit_type": "ldo_regulation",
+        "components": [ref],
+        "regulator": ref,
+        "mpn": mpn,
+        "expected": {
+            "vout_V": vout_target,
+            "dropout_V": dropout_v,
+        },
+        "simulated": {},
+        "delta": {},
+    }
+
+    if vout_pre is None or vout_final is None:
+        result["status"] = "skip"
+        result["note"] = "Transient simulation did not produce output voltage"
+        return result
+
+    result["simulated"]["vout_pre_V"] = round(vout_pre, 4)
+    result["simulated"]["vout_final_V"] = round(vout_final, 4)
+    if vout_min is not None:
+        result["simulated"]["vout_min_V"] = round(vout_min, 4)
+
+    if vout_target <= 0:
+        result["status"] = "skip"
+        result["note"] = "No target voltage to compare against"
+        return result
+
+    dc_error_pct = abs(vout_pre - vout_target) / vout_target * 100
+    result["delta"]["dc_error_pct"] = round(dc_error_pct, 2)
+
+    droop_pct = 0.0
+    if vout_min is not None and vout_min < vout_pre:
+        droop_pct = (vout_pre - vout_min) / vout_target * 100
+        result["delta"]["droop_pct"] = round(droop_pct, 2)
+
+    if dc_error_pct > 5:
+        result["status"] = "fail"
+        result["note"] = (f"Output {vout_pre:.3f}V is {dc_error_pct:.1f}% off "
+                          f"target {vout_target}V — LDO may be in dropout")
+    elif droop_pct > 10:
+        result["status"] = "fail"
+        result["note"] = f"{droop_pct:.1f}% droop during load step — insufficient output capacitance"
+    elif dc_error_pct > 2 or droop_pct > 5:
+        result["status"] = "warn"
+        result["note"] = f"Vout={vout_pre:.3f}V (error {dc_error_pct:.1f}%), droop {droop_pct:.1f}%"
+    else:
+        result["status"] = "pass"
+        result["note"] = f"Vout={vout_pre:.3f}V, droop {droop_pct:.1f}% — within limits"
+
+    return result
+
+
 def evaluate_rf_matching(det, sim_results):
     """Evaluate RF matching network simulation results.
 
@@ -1098,6 +1166,7 @@ EVALUATOR_REGISTRY = {
     "protection_devices": evaluate_protection_device,
     "decoupling_analysis": evaluate_decoupling,
     "power_regulators": evaluate_regulator_feedback,
+    "ldo_regulation": evaluate_ldo_regulation,
     "rf_matching": evaluate_rf_matching,
     "bridge_circuits": evaluate_bridge_circuit,
     "inrush_analysis": evaluate_inrush,

@@ -1335,6 +1335,101 @@ VIN out_rail 0 DC {vin}
     return SpiceTestbench(circuit, analyses, measurements, extra)
 
 
+def generate_ldo_regulation(det, output_file, context=None, parasitics=None):
+    """Generate testbench for LDO regulation: load-step transient and dropout.
+
+    Uses a behavioral LDO model (from spice_part_library specs) with the
+    actual output capacitor bank to simulate transient load response.
+
+    Args:
+        det: Finding dict from power_regulators with topology=="LDO".
+             Keys: ref, value, input_rail, output_rail, output_capacitors,
+             estimated_vout, topology
+        output_file: Path for ASCII results file
+
+    Returns:
+        SpiceTestbench or None if insufficient data
+    """
+    if det.get("topology") != "LDO":
+        return None
+
+    ref = det.get("ref", "U?")
+    mpn = det.get("value", "")
+
+    from spice_part_library import lookup_ldo_specs
+    from spice_model_generator import generate_ldo_model
+
+    specs = lookup_ldo_specs(mpn)
+    if not specs:
+        vout_target = det.get("estimated_vout") or _infer_voltage(det.get("output_rail"), default=None)
+        if not vout_target:
+            return None
+        specs = {"vref": vout_target, "dropout_mv": 300, "iq_ua": 100,
+                 "iout_max_ma": 200, "fixed": True}
+
+    vout = specs["vref"]
+    dropout_v = specs["dropout_mv"] / 1000
+    iout_max = specs["iout_max_ma"] / 1000
+    vin = _infer_voltage(det.get("input_rail"), default=vout + 1.5)
+    if vin <= vout + dropout_v:
+        vin = vout + dropout_v + 0.5
+
+    subckt = generate_ldo_model(mpn or ref, specs)
+    subckt_name = f"LDO_{mpn.upper().replace('-', '_').replace('.', '_')}" if mpn else f"LDO_{ref}"
+
+    output_caps = det.get("output_capacitors") or []
+    valid_caps = [c for c in output_caps if isinstance(c, dict) and c.get("farads") and c["farads"] > 0]
+
+    cap_lines = []
+    for i, c in enumerate(valid_caps):
+        farads = c["farads"]
+        esr = 0.005 if farads >= 1e-5 else 0.01
+        cap_lines.append(f"Resr{i} out cap{i} {_format_eng(esr)}")
+        cap_lines.append(f"Cout{i} cap{i} 0 {_format_eng(farads)}")
+    if not cap_lines:
+        cap_lines = [f"Resr0 out cap0 0.005", f"Cout0 cap0 0 10u"]
+
+    cap_netlist = "\n".join(cap_lines)
+
+    i_light = iout_max * 0.1
+    i_heavy = iout_max * 0.9
+    step_time = 100e-6
+
+    circuit = f"""\
+* LDO regulation testbench: {ref} ({mpn})
+* Vin={vin}V, Vout(target)={vout}V, dropout={dropout_v*1000:.0f}mV
+* Load step: {i_light*1000:.0f}mA -> {i_heavy*1000:.0f}mA at t={step_time*1e6:.0f}us
+
+{subckt}
+
+VIN vin_node 0 DC {vin}
+XLDO vin_node out 0 {subckt_name}
+
+* Output capacitor bank (with ESR)
+{cap_netlist}
+
+* Load current source — steps from light to heavy at t={step_time*1e6:.0f}us
+Iload out 0 PWL(0 {_format_eng(i_light)} {_format_eng(step_time - 1e-6)} {_format_eng(i_light)} {_format_eng(step_time)} {_format_eng(i_heavy)})
+"""
+
+    sim_time = step_time * 5
+    analyses = [("tran", f"{_format_eng(sim_time / 1000)} {_format_eng(sim_time)}")]
+    measurements = [
+        ("vout_pre", "find", "v(out)", f"at={_format_eng(step_time * 0.9)}"),
+        ("vout_min", "min", "v(out)"),
+        ("vout_final", "find", "v(out)", f"at={_format_eng(sim_time * 0.9)}"),
+    ]
+    extra = {
+        "vout_target": str(vout),
+        "vin": str(vin),
+        "dropout_v": str(dropout_v),
+        "iout_light_a": str(i_light),
+        "iout_heavy_a": str(i_heavy),
+    }
+
+    return SpiceTestbench(circuit, analyses, measurements, extra)
+
+
 def generate_rf_matching(det, output_file, context=None, parasitics=None):
     """Generate testbench for an RF matching network.
 
@@ -1721,6 +1816,7 @@ TEMPLATE_REGISTRY = {
     "protection_devices": generate_protection_device,
     "decoupling_analysis": generate_decoupling,
     "power_regulators": generate_regulator_feedback,
+    "ldo_regulation": generate_ldo_regulation,
     "rf_matching": generate_rf_matching,
     "bridge_circuits": generate_bridge_circuit,
     "bms_systems": generate_bms_balance,

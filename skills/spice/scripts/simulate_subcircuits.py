@@ -135,6 +135,13 @@ def simulate_subcircuits(analysis_json, workdir=None, timeout=5, types=None,
         if snubber_circuits:
             signal["snubber_circuits"] = snubber_circuits
 
+    # Synthesize ldo_regulation from power_regulators with LDO topology
+    pr = signal.get("power_regulators", [])
+    if isinstance(pr, list):
+        ldo_dets = [f for f in pr if isinstance(f, dict) and f.get("topology") == "LDO"]
+        if ldo_dets:
+            signal["ldo_regulation"] = ldo_dets
+
     # Filter to requested types
     sim_types = types if types else list_supported_types()
 
