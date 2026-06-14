@@ -3981,15 +3981,16 @@ def audit_rail_sources(ctx: AnalysisContext,
 
     def _has_direct_source(net_info: dict, net_name: str) -> bool:
         # Direct power_out pin anywhere on the net, OR an explicit PWR_FLAG
-        # (#FLG) tied to it, OR the rail is a regulator output.
+        # tied to it, OR the rail is a regulator output.
         # NOTE: #PWR symbols are KiCad power port instances; they appear as
         # power_in in the analyzer and are NOT treated as sources here.
+        if net_info.get("has_pwr_flag"):
+            return True
         for p in net_info.get("pins", []):
             if p.get("pin_type") == "power_out":
                 return True
             comp = p.get("component") or ""
             if comp.startswith("#FLG"):
-                # PWR_FLAG explicit declaration — ERC source marker.
                 return True
         return net_name in reg_output_nets
 

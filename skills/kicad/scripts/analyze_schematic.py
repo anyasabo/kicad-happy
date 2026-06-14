@@ -1283,19 +1283,25 @@ def build_net_map(components: list[dict], wires: list[dict], labels: list[dict],
         point_info.setdefault(k, []).append(info)
         return k
 
-    # Add component pins (skip PWR_FLAG — it's an ERC marker, not a real connection)
+    # Add component pins. PWR_FLAG is an ERC marker, not a real connection —
+    # still register its position so the net gets a has_pwr_flag annotation.
     for comp in components:
-        if comp.get("value") == "PWR_FLAG" or comp.get("type") == "power_flag":
-            continue
+        is_pwr_flag = comp.get("value") == "PWR_FLAG" or comp.get("type") == "power_flag"
         sheet = comp.get("_sheet", 0)
         for pin in comp.get("pins", []):
-            add_point(pin["x"], pin["y"], {
-                "source": "pin",
-                "component": comp["reference"],
-                "pin_number": pin["number"],
-                "pin_name": pin["name"],
-                "pin_type": pin["type"],
-            }, sheet)
+            if is_pwr_flag:
+                add_point(pin["x"], pin["y"], {
+                    "source": "pwr_flag",
+                    "component": comp["reference"],
+                }, sheet)
+            else:
+                add_point(pin["x"], pin["y"], {
+                    "source": "pin",
+                    "component": comp["reference"],
+                    "pin_number": pin["number"],
+                    "pin_name": pin["name"],
+                    "pin_type": pin["type"],
+                }, sheet)
 
     # Add wire endpoints and union them.
     # Also build a list of wire segments so we can detect points that land
@@ -1493,6 +1499,8 @@ def build_net_map(components: list[dict], wires: list[dict], labels: list[dict],
                    for i in all_info if i["source"] == "pin")
         )
 
+        has_pwr_flag = any(i["source"] == "pwr_flag" for i in all_info)
+
         if net_name is None:
             # Only create unnamed nets if they have component pins
             has_pins = any(i["source"] == "pin" for i in all_info)
@@ -1524,6 +1532,8 @@ def build_net_map(components: list[dict], wires: list[dict], labels: list[dict],
                 nets[net_name]["point_count"] += len(members)
                 if has_nc_marker:
                     nets[net_name]["no_connect"] = True
+                if has_pwr_flag:
+                    nets[net_name]["has_pwr_flag"] = True
                 existing_labels = nets[net_name].setdefault("labels", [])
                 existing_seen = {(lbl["name"], lbl["type"]) for lbl in existing_labels}
                 for nl in net_labels:
@@ -1536,6 +1546,7 @@ def build_net_map(components: list[dict], wires: list[dict], labels: list[dict],
                     "pins": pin_connections,
                     "point_count": len(members),
                     "no_connect": has_nc_marker,
+                    "has_pwr_flag": has_pwr_flag,
                     "labels": net_labels,
                 }
 
