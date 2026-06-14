@@ -42,7 +42,7 @@ Planned analyzer enhancements — verifiable checks that aren't yet implemented.
 
 ## Floating / Mis-connected Pins
 
-- [ ] **FP-001**: IC input pins left floating (no pull-up/down, no driver) — flag based on pin electrical type.
+- [x] **FP-001**: IC input pins left floating (no pull-up/down, no driver) — flag based on pin electrical type.
 - [ ] **FP-002**: NC (no-connect) pins accidentally connected to a net.
 
 ## Thermal Pad Connectivity

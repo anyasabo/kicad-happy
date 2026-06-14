@@ -4088,6 +4088,80 @@ def detect_design_observations(ctx: AnalysisContext, results: dict) -> list[dict
                     ),
                 })
 
+    # 13. FP-001: Floating IC input pins
+    _DRIVER_PIN_TYPES = ("output", "bidirectional", "open_collector", "open_emitter", "power_out")
+    no_connect_nets = {net_name for net_name, net_info in ctx.nets.items()
+                       if net_info.get("no_connect")}
+
+    for net_name, net_info in ctx.nets.items():
+        if ctx.is_power_net(net_name) or ctx.is_ground(net_name):
+            continue
+        if net_name in no_connect_nets:
+            continue
+        if net_name.startswith("__unnamed_"):
+            continue
+        if net_name in connector_nets:
+            continue
+
+        pins = net_info.get("pins", [])
+        ic_inputs = []
+        has_driver = False
+        has_passive = False
+
+        for p in pins:
+            comp = ctx.comp_lookup.get(p["component"])
+            if not comp:
+                continue
+            pin_type = p.get("pin_type", "")
+            if comp["type"] == "ic" and pin_type == "input":
+                ic_inputs.append(p)
+            elif pin_type in _DRIVER_PIN_TYPES:
+                has_driver = True
+            elif comp["type"] in ("resistor", "capacitor"):
+                has_passive = True
+
+        if ic_inputs and not has_driver and not has_passive:
+            for p in ic_inputs:
+                pin_name = p.get("pin_name", p["pin_number"])
+                design_observations.append({
+                    "category": "floating_input",
+                    "component": p["component"],
+                    "net": net_name,
+                    "pin": pin_name,
+                    "detector": "detect_design_observations",
+                    "rule_id": "FP-001",
+                    "severity": "warning",
+                    "confidence": "heuristic",
+                    "evidence_source": "topology",
+                    "summary": (
+                        f"IC {p['component']} input pin {pin_name} "
+                        f"floating on net {net_name}"
+                    ),
+                    "description": (
+                        f"Input pin {pin_name} on {p['component']} has no "
+                        f"driver (output/bidirectional) or pull-up/down "
+                        f"resistor on net {net_name}. Floating CMOS inputs "
+                        f"draw excess current and may cause unpredictable "
+                        f"behavior."
+                    ),
+                    "components": [p["component"]],
+                    "nets": [net_name],
+                    "pins": [],
+                    "recommendation": (
+                        f"Add a pull-up or pull-down resistor, or connect "
+                        f"to a driven signal. If intentionally unused, add "
+                        f"a no-connect marker in the schematic."
+                    ),
+                    "report_context": {
+                        "section": "Signal Integrity",
+                        "impact": "Excess current draw, unpredictable behavior",
+                        "standard_ref": "",
+                    },
+                    "provenance": make_provenance(
+                        "floating_input", "heuristic", [p["component"]]
+                    ),
+                })
+
     return design_observations
 
 

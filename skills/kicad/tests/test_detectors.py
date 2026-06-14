@@ -506,6 +506,106 @@ def test_ak001_segment_intersects_rect():
 
 
 # ---------------------------------------------------------------------------
+# FP-001: Floating IC input pins
+# ---------------------------------------------------------------------------
+
+def test_fp001_fires_on_undriven_input():
+    """IC input pin with no driver or passive should trigger FP-001."""
+    components = [
+        {"reference": "U1", "value": "ESP32", "type": "ic", "pins": []},
+        {"reference": "U2", "value": "SENSOR", "type": "ic", "pins": []},
+    ]
+    nets = {
+        "+3V3": {"pins": [
+            {"component": "#PWR01", "pin_number": "1", "pin_name": "VCC", "pin_type": "power_out"},
+            {"component": "U1", "pin_number": "1", "pin_name": "VDD", "pin_type": "power_in"},
+        ]},
+        "ALERT": {"pins": [
+            {"component": "U2", "pin_number": "5", "pin_name": "ALERT", "pin_type": "input"},
+        ]},
+    }
+    ctx = _make_ctx(components, nets, known_power_rails={"+3V3"})
+    results = {"decoupling_analysis": [], "protection_devices": [], "power_regulators": [],
+               "crystal_circuits": []}
+    obs = detect_design_observations(ctx, results)
+    fp001 = [o for o in obs if o.get("rule_id") == "FP-001"]
+    assert len(fp001) == 1, f"Expected 1 FP-001, got {len(fp001)}"
+    assert fp001[0]["component"] == "U2"
+    assert "ALERT" in fp001[0]["summary"]
+
+
+def test_fp001_no_fire_with_driver():
+    """IC input pin driven by another IC's output should not trigger FP-001."""
+    components = [
+        {"reference": "U1", "value": "ESP32", "type": "ic", "pins": []},
+        {"reference": "U2", "value": "SENSOR", "type": "ic", "pins": []},
+    ]
+    nets = {
+        "+3V3": {"pins": [
+            {"component": "#PWR01", "pin_number": "1", "pin_name": "VCC", "pin_type": "power_out"},
+            {"component": "U1", "pin_number": "1", "pin_name": "VDD", "pin_type": "power_in"},
+        ]},
+        "CLK": {"pins": [
+            {"component": "U1", "pin_number": "5", "pin_name": "CLK_OUT", "pin_type": "output"},
+            {"component": "U2", "pin_number": "3", "pin_name": "CLK_IN", "pin_type": "input"},
+        ]},
+    }
+    ctx = _make_ctx(components, nets, known_power_rails={"+3V3"})
+    results = {"decoupling_analysis": [], "protection_devices": [], "power_regulators": [],
+               "crystal_circuits": []}
+    obs = detect_design_observations(ctx, results)
+    fp001 = [o for o in obs if o.get("rule_id") == "FP-001"]
+    assert len(fp001) == 0, f"Expected no FP-001 with driver present, got {len(fp001)}"
+
+
+def test_fp001_no_fire_with_pullup():
+    """IC input pin with pull-up resistor should not trigger FP-001."""
+    components = [
+        {"reference": "U1", "value": "ESP32", "type": "ic", "pins": []},
+        {"reference": "U2", "value": "SENSOR", "type": "ic", "pins": []},
+        {"reference": "R1", "value": "10k", "type": "resistor", "pins": []},
+    ]
+    nets = {
+        "+3V3": {"pins": [
+            {"component": "#PWR01", "pin_number": "1", "pin_name": "VCC", "pin_type": "power_out"},
+            {"component": "R1", "pin_number": "2", "pin_name": "", "pin_type": "passive"},
+        ]},
+        "EN": {"pins": [
+            {"component": "U2", "pin_number": "4", "pin_name": "EN", "pin_type": "input"},
+            {"component": "R1", "pin_number": "1", "pin_name": "", "pin_type": "passive"},
+        ]},
+    }
+    ctx = _make_ctx(components, nets, known_power_rails={"+3V3"})
+    results = {"decoupling_analysis": [], "protection_devices": [], "power_regulators": [],
+               "crystal_circuits": []}
+    obs = detect_design_observations(ctx, results)
+    fp001 = [o for o in obs if o.get("rule_id") == "FP-001"]
+    assert len(fp001) == 0, f"Expected no FP-001 with pull-up, got {len(fp001)}"
+
+
+def test_fp001_no_fire_on_no_connect():
+    """IC input pin on a no-connect net should not trigger FP-001."""
+    components = [
+        {"reference": "U1", "value": "ESP32", "type": "ic", "pins": []},
+    ]
+    nets = {
+        "+3V3": {"pins": [
+            {"component": "#PWR01", "pin_number": "1", "pin_name": "VCC", "pin_type": "power_out"},
+            {"component": "U1", "pin_number": "1", "pin_name": "VDD", "pin_type": "power_in"},
+        ]},
+        "NC_PIN": {"pins": [
+            {"component": "U1", "pin_number": "10", "pin_name": "NC", "pin_type": "input"},
+        ], "no_connect": True},
+    }
+    ctx = _make_ctx(components, nets, known_power_rails={"+3V3"})
+    results = {"decoupling_analysis": [], "protection_devices": [], "power_regulators": [],
+               "crystal_circuits": []}
+    obs = detect_design_observations(ctx, results)
+    fp001 = [o for o in obs if o.get("rule_id") == "FP-001"]
+    assert len(fp001) == 0, f"Expected no FP-001 for no-connect pin, got {len(fp001)}"
+
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 
