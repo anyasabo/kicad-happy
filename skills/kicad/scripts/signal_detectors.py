@@ -3985,6 +3985,109 @@ def detect_design_observations(ctx: AnalysisContext, results: dict) -> list[dict
                 })
                 break  # one finding per IC, not per pin
 
+    # 12. BOOT-001: ESP32 bootstrap pin conflict detection
+    _ESP_STRAPPING_PINS = {
+        "ESP32-S3": {
+            "GPIO0": ("boot mode", "High=SPI flash boot, Low=download mode"),
+            "GPIO3": ("JTAG source", "Low=GPIO JTAG, High=USB JTAG"),
+            "GPIO45": ("VDD_SPI voltage", "Low=3.3V, High=1.8V"),
+            "GPIO46": ("boot log verbosity", "Low=verbose, High=silent"),
+        },
+        "ESP32": {
+            "GPIO0": ("boot mode", "High=SPI flash boot, Low=download mode"),
+            "GPIO2": ("boot mode", "Must be low for download mode on some revs"),
+            "GPIO12": ("VDD_SDIO voltage", "Low=3.3V, High=1.8V flash"),
+            "GPIO15": ("JTAG/SDIO timing", "High=normal boot, Low=silences boot log"),
+        },
+    }
+    _SAFE_STRAP_TYPES = ("resistor", "capacitor", "switch", "test_point", "connector")
+
+    for ic in unique_ics:
+        ref = ic["reference"]
+        mpn = (ic.get("mpn") or ic.get("value") or "").upper()
+        strap_table = None
+        for family, pins in _ESP_STRAPPING_PINS.items():
+            if family.upper().replace("-", "") in mpn.replace("-", ""):
+                strap_table = pins
+                break
+        if not strap_table:
+            continue
+
+        for pin_data in ctx.ref_pins.get(ref, {}).values():
+            net, _ = pin_data
+            if not net or ctx.is_ground(net) or ctx.is_power_net(net):
+                continue
+            pin_info = None
+            net_info_tmp = ctx.nets.get(net, {})
+            for p in net_info_tmp.get("pins", []):
+                if p["component"] == ref:
+                    pin_name = p.get("pin_name", "")
+                    for strap_gpio, (func, desc) in strap_table.items():
+                        if re.search(r'(?<![0-9])' + strap_gpio + r'(?![0-9])', pin_name):
+                            pin_info = (strap_gpio, func, desc)
+                            break
+                    if pin_info:
+                        break
+            if not pin_info:
+                continue
+
+            strap_gpio, func, desc = pin_info
+            net_info = ctx.nets.get(net, {})
+            conflicting = []
+            for p in net_info.get("pins", []):
+                if p["component"] == ref:
+                    continue
+                other_comp = ctx.comp_lookup.get(p["component"])
+                if not other_comp:
+                    continue
+                if other_comp["type"] in _SAFE_STRAP_TYPES:
+                    continue
+                other_pin_type = p.get("pin_type", "")
+                if other_pin_type in ("output", "bidirectional", "open_collector", "open_emitter"):
+                    conflicting.append((p["component"], p.get("pin_name", ""), other_pin_type))
+
+            if conflicting:
+                conflict_desc = ", ".join(f"{c[0]}.{c[1]} ({c[2]})" for c in conflicting)
+                design_observations.append({
+                    "category": "bootstrap",
+                    "component": ref,
+                    "strapping_pin": strap_gpio,
+                    "net": net,
+                    "detector": "detect_design_observations",
+                    "rule_id": "BOOT-001",
+                    "severity": "warning",
+                    "confidence": "heuristic",
+                    "evidence_source": "datasheet",
+                    "summary": (
+                        f"{strap_gpio} ({func}) on net {net} "
+                        f"driven by {conflicting[0][0]}"
+                    ),
+                    "description": (
+                        f"ESP32 strapping pin {strap_gpio} controls {func} "
+                        f"({desc}). Net '{net}' has output-capable pins that "
+                        f"may drive during reset: {conflict_desc}. If driven "
+                        f"to wrong level at boot, the chip enters wrong mode."
+                    ),
+                    "components": [ref] + [c[0] for c in conflicting],
+                    "nets": [net],
+                    "pins": [],
+                    "recommendation": (
+                        f"Ensure {conflict_desc} cannot drive {strap_gpio} "
+                        f"during power-on reset. Add series resistor or "
+                        f"tristate the output during boot (EN/OE tied to "
+                        f"ESP32 reset timing)."
+                    ),
+                    "report_context": {
+                        "section": "Boot Configuration",
+                        "impact": "Device may fail to boot or enter wrong mode",
+                        "standard_ref": "ESP32 Technical Reference Manual, Section 6",
+                    },
+                    "provenance": make_provenance(
+                        "strap_pin_conflict", "heuristic",
+                        [ref] + [c[0] for c in conflicting]
+                    ),
+                })
+
     return design_observations
 
 
