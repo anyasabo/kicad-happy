@@ -817,15 +817,17 @@ def format_text_report(result: dict) -> str:
             )
         lines.append("")
 
-    # Findings by severity
-    if findings:
+    # Findings by severity (skip raw assessment entries merged into findings[])
+    rule_findings = [f for f in findings if "rule_id" in f]
+    if rule_findings:
         lines.append("-" * 60)
         lines.append("Findings")
         lines.append("-" * 60)
 
-        for f in findings:
+        for f in rule_findings:
             sev = f["severity"]
-            lines.append(f"  [{sev}] {f['rule_id']}: {f['title']}")
+            title = f.get("title") or f.get("summary", "")
+            lines.append(f"  [{sev}] {f['rule_id']}: {title}")
             desc = f.get("description", "")
             for i in range(0, len(desc), 70):
                 prefix = "    " if i == 0 else "      "
