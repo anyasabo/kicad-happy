@@ -2369,6 +2369,43 @@ def analyze_trace_proximity(tracks: dict, net_names: dict[int, str],
     }
 
 
+_IPC2152_1OZ_10C = {
+    0.5: 0.25, 1.0: 0.50, 2.0: 1.10, 3.0: 1.80,
+    5.0: 3.50, 7.0: 5.50, 10.0: 9.0,
+}
+
+
+def _min_trace_width_for_current(current_a: float) -> float:
+    """IPC-2152 minimum trace width for given current (1oz Cu, 10C rise)."""
+    prev_i, prev_w = 0.0, 0.0
+    for i, w in sorted(_IPC2152_1OZ_10C.items()):
+        if current_a <= i:
+            if prev_i == 0:
+                return w
+            frac = (current_a - prev_i) / (i - prev_i)
+            return prev_w + frac * (w - prev_w)
+        prev_i, prev_w = i, w
+    return prev_w
+
+
+_POWER_NET_CURRENT_HEURISTIC = [
+    (re.compile(r'(?i)^VBUS$'), 0.5),
+    (re.compile(r'(?i)VBAT|V_BAT'), 1.0),
+    (re.compile(r'(?i)^VIN$|^V_IN$'), 1.0),
+    (re.compile(r'(?i)^5V|5V0|\+5V'), 0.5),
+    (re.compile(r'(?i)3V3|3\.3V|\+3V3'), 0.3),
+    (re.compile(r'(?i)1V8|1\.8V|\+1V8'), 0.2),
+]
+
+
+def _heuristic_current_for_net(name: str) -> float | None:
+    """Return a conservative current estimate based on net name, or None."""
+    for pattern, current in _POWER_NET_CURRENT_HEURISTIC:
+        if pattern.search(name):
+            return current
+    return None
+
+
 def analyze_current_capacity(tracks: dict, vias: dict, zones: list[dict],
                              net_names: dict[int, str],
                              setup: dict) -> dict:
@@ -2494,6 +2531,29 @@ def analyze_current_capacity(tracks: dict, vias: dict, zones: list[dict],
                 "impact": "Power delivery",
                 "standard_ref": "IPC-2221",
             }
+
+            has_zone = net_num in net_zones
+            heuristic_i = _heuristic_current_for_net(name)
+            if heuristic_i and not has_zone:
+                min_w = _min_trace_width_for_current(heuristic_i)
+                if data["min_width"] < min_w * 0.8:
+                    entry["rule_id"] = "CC-001"
+                    entry["severity"] = "warning"
+                    entry["confidence"] = "heuristic"
+                    entry["summary"] = (
+                        f"Power net {name}: {data['min_width']}mm trace may be "
+                        f"undersized for ~{heuristic_i}A"
+                    )
+                    entry["description"] = (
+                        f"Power net {name} trace width {data['min_width']}mm is below "
+                        f"IPC-2152 recommendation of {min_w:.2f}mm for ~{heuristic_i}A "
+                        f"(1oz Cu, 10°C rise)."
+                    )
+                    entry["recommendation"] = (
+                        f"Widen {name} traces to >= {min_w:.2f}mm or add a copper pour."
+                    )
+                    entry["report_context"]["standard_ref"] = "IPC-2152"
+
             power_entries.append(entry)
         elif data["min_width"] <= 0.15 and data["segment_count"] >= 5:
             # Signal nets with ≤0.15mm traces and significant routing
@@ -3549,6 +3609,176 @@ def analyze_placement(footprints: list[dict], outline: dict) -> dict:
         result["edge_clearance_warnings"] = edge_close[:20]
 
     return result
+
+
+_ANTENNA_KEEPOUT_MODULES = {
+    "ESP32-S3-WROOM-1": {"antenna_end": "top", "keepout_mm": 7.0},
+    "ESP32-S3-WROOM-2": {"antenna_end": "top", "keepout_mm": 7.0},
+    "ESP32-WROOM-32": {"antenna_end": "top", "keepout_mm": 7.0},
+    "ESP32-WROOM-32E": {"antenna_end": "top", "keepout_mm": 7.0},
+    "ESP32-WROVER": {"antenna_end": "top", "keepout_mm": 7.0},
+    "ESP32-C3-WROOM-02": {"antenna_end": "top", "keepout_mm": 5.0},
+    "nRF52840-MDBT50Q": {"antenna_end": "top", "keepout_mm": 5.0},
+}
+
+# Variants with external antenna (U.FL) — no PCB keepout needed
+_EXTERNAL_ANTENNA_SUFFIXES = ("-1U", "-1U-N", "-32U", "-02U")
+
+
+def analyze_antenna_keepout(footprints: list[dict], tracks: dict,
+                            vias: dict, zones: list[dict]) -> list[dict]:
+    """AK-001: Check for copper intrusion into RF module antenna keepout zones."""
+    findings = []
+
+    rf_fps = [fp for fp in footprints if _is_rf_module(fp)]
+    if not rf_fps:
+        return findings
+
+    for fp in rf_fps:
+        cy = fp.get("courtyard")
+        if not cy:
+            continue
+        ref = fp["reference"]
+        fp_layer = fp.get("layer", "F.Cu")
+
+        # Determine antenna keepout rectangle.
+        # Strategy: use the known module table if available, otherwise
+        # estimate from courtyard vs pad bbox difference.
+        fp_value = fp.get("value", "") or fp.get("footprint", "") or ""
+        fp_id = (fp_value + " " + (fp.get("library", "") or "")).upper()
+
+        # Skip modules with external antenna (U.FL connector) — no PCB keepout needed
+        if any(suf.upper() in fp_id for suf in _EXTERNAL_ANTENNA_SUFFIXES):
+            continue
+
+        module_spec = None
+        for name, spec in _ANTENNA_KEEPOUT_MODULES.items():
+            if name.lower() in fp_value.lower() or name.lower() in fp.get("library", "").lower():
+                module_spec = spec
+                break
+
+        # Build keepout rectangle
+        if module_spec:
+            keepout_depth = module_spec["keepout_mm"]
+            # "top" means the antenna is at the min-Y end (KiCad Y grows downward)
+            if module_spec["antenna_end"] == "top":
+                keepout = {
+                    "min_x": cy["min_x"],
+                    "max_x": cy["max_x"],
+                    "min_y": cy["min_y"],
+                    "max_y": cy["min_y"] + keepout_depth,
+                }
+            else:
+                keepout = {
+                    "min_x": cy["min_x"],
+                    "max_x": cy["max_x"],
+                    "min_y": cy["max_y"] - keepout_depth,
+                    "max_y": cy["max_y"],
+                }
+        else:
+            # Fallback: use the top 30% of courtyard as antenna region
+            cy_height = cy["max_y"] - cy["min_y"]
+            keepout = {
+                "min_x": cy["min_x"],
+                "max_x": cy["max_x"],
+                "min_y": cy["min_y"],
+                "max_y": cy["min_y"] + cy_height * 0.3,
+            }
+
+        # Check tracks in keepout (both layers — ground plane intrusion matters)
+        intruding_tracks = 0
+        for seg in tracks.get("segments", []):
+            sx, sy = seg.get("start_x", 0), seg.get("start_y", 0)
+            ex, ey = seg.get("end_x", 0), seg.get("end_y", 0)
+            if _segment_intersects_rect(sx, sy, ex, ey, keepout):
+                intruding_tracks += 1
+
+        # Check vias in keepout
+        intruding_vias = 0
+        for via in vias.get("vias", []):
+            vx, vy = via.get("x", 0), via.get("y", 0)
+            if (keepout["min_x"] <= vx <= keepout["max_x"] and
+                    keepout["min_y"] <= vy <= keepout["max_y"]):
+                intruding_vias += 1
+
+        # Check zones with fills in keepout (simplified: zone bbox overlap)
+        intruding_zones = []
+        for z in zones:
+            zn = z.get("net_name", "")
+            zbbox = z.get("filled_bbox") or z.get("outline_bbox")
+            if not zbbox:
+                continue
+            # bbox is [min_x, min_y, max_x, max_y]
+            zmin_x, zmin_y, zmax_x, zmax_y = zbbox[0], zbbox[1], zbbox[2], zbbox[3]
+            if (zmin_x < keepout["max_x"] and zmax_x > keepout["min_x"] and
+                    zmin_y < keepout["max_y"] and zmax_y > keepout["min_y"]):
+                intruding_zones.append(zn or f"zone_{z.get('net', 0)}")
+
+        total_intrusions = intruding_tracks + intruding_vias + len(intruding_zones)
+        if total_intrusions > 0:
+            parts = []
+            if intruding_tracks:
+                parts.append(f"{intruding_tracks} track segments")
+            if intruding_vias:
+                parts.append(f"{intruding_vias} vias")
+            if intruding_zones:
+                parts.append(f"zone(s): {', '.join(intruding_zones[:3])}")
+            findings.append({
+                "component": ref,
+                "keepout_rect": keepout,
+                "intrusions": total_intrusions,
+                "detector": "analyze_antenna_keepout",
+                "rule_id": "AK-001",
+                "category": "rf_integrity",
+                "severity": "warning",
+                "confidence": "heuristic",
+                "evidence_source": "topology",
+                "summary": (
+                    f"Copper intrusion in {ref} antenna keepout: "
+                    f"{', '.join(parts)}"
+                ),
+                "description": (
+                    f"RF module {ref} ({fp_value}) has copper in its antenna "
+                    f"keepout zone. Ground planes, traces, and vias near the "
+                    f"antenna degrade RF performance and reduce wireless range."
+                ),
+                "components": [ref],
+                "nets": [],
+                "pins": [],
+                "recommendation": (
+                    f"Remove copper (traces, vias, zones) from the antenna "
+                    f"keepout area of {ref}. Add a board edge cutout or zone "
+                    f"exclusion under the antenna region."
+                ),
+                "report_context": {
+                    "section": "RF Integrity",
+                    "impact": "Wireless range / antenna efficiency",
+                    "standard_ref": "",
+                },
+            })
+
+    return findings
+
+
+def _segment_intersects_rect(sx, sy, ex, ey, rect):
+    """Check if a line segment intersects or is inside a rectangle."""
+    # Quick check: if both endpoints are outside on the same side, no intersection
+    r = rect
+    if sx < r["min_x"] and ex < r["min_x"]:
+        return False
+    if sx > r["max_x"] and ex > r["max_x"]:
+        return False
+    if sy < r["min_y"] and ey < r["min_y"]:
+        return False
+    if sy > r["max_y"] and ey > r["max_y"]:
+        return False
+    # Either an endpoint is inside, or the segment crosses the rect
+    if (r["min_x"] <= sx <= r["max_x"] and r["min_y"] <= sy <= r["max_y"]):
+        return True
+    if (r["min_x"] <= ex <= r["max_x"] and r["min_y"] <= ey <= r["max_y"]):
+        return True
+    # Segment might cross the rect without endpoints inside — conservative: true
+    return True
 
 
 def analyze_layer_transitions(tracks: dict, vias: dict,
@@ -6059,6 +6289,9 @@ def analyze_pcb(path: str, *, proximity: bool = False,
     # Placement analysis (courtyard overlaps, edge clearance, density)
     placement = analyze_placement(footprints, outline)
 
+    # Antenna keepout check for RF modules
+    antenna_keepout_findings = analyze_antenna_keepout(footprints, tracks, vias, zones)
+
     # Silkscreen text extraction
     silkscreen = extract_silkscreen(root, footprints)
 
@@ -6394,6 +6627,8 @@ def analyze_pcb(path: str, *, proximity: bool = False,
         findings.extend(copper.get('touch_pad_gnd_clearance', []))
         if copper.get('opposite_layer_summary'):
             result['copper_presence_summary'] = copper['opposite_layer_summary']
+
+    findings.extend(antenna_keepout_findings)
 
     # Deterministic order for byte-identical repeated runs (KH-316).
     sort_findings(findings)

@@ -419,6 +419,7 @@ def validate_voltage_levels(ctx: AnalysisContext, level_shifters: list[dict] | N
                 ic_pins_on_net.append({
                     'ref': ref, 'pin': p.get('pin_name', ''),
                     'pin_number': p['pin_number'], 'voltage': ic_voltages[ref],
+                    'pin_type': p.get('pin_type', ''),
                 })
 
         if len(ic_pins_on_net) < 2:
@@ -464,6 +465,15 @@ def validate_voltage_levels(ctx: AnalysisContext, level_shifters: list[dict] | N
                         skip_en = True
                         break
         if skip_en:
+            continue
+
+        # Lower-voltage IC driving an output/open-drain pin can't receive the higher rail
+        skip_output_driver = False
+        for p in ic_pins_on_net:
+            if p['voltage'] == v_min and p['pin_type'] in ('output', 'open_collector', 'open_emitter'):
+                skip_output_driver = True
+                break
+        if skip_output_driver:
             continue
 
         low_thresh = _closest_threshold(v_min)

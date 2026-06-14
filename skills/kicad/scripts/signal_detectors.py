@@ -3587,6 +3587,36 @@ def detect_design_observations(ctx: AnalysisContext, results: dict) -> list[dict
                 "report_context": {"section": "Design Observations", "impact": "", "standard_ref": ""},
                 "provenance": make_provenance("obs_topology", "heuristic", ic_refs),
             })
+            if not has_pullup:
+                design_observations.append({
+                    "category": "i2c_bus",
+                    "net": net_name,
+                    "line": line,
+                    "detector": "detect_design_observations",
+                    "rule_id": "PU-001",
+                    "severity": "warning",
+                    "confidence": "heuristic",
+                    "evidence_source": "topology",
+                    "summary": f"I2C {line} ({net_name}) missing pull-up resistor",
+                    "description": (
+                        f"I2C {line} line {net_name} has no pull-up resistor to a "
+                        f"power rail. I2C requires pull-ups on both SDA and SCL for "
+                        f"correct open-drain operation."
+                    ),
+                    "components": ic_refs,
+                    "nets": [net_name],
+                    "pins": [],
+                    "recommendation": (
+                        f"Add a pull-up resistor (typically 2.2k-10k) from {net_name} "
+                        f"to the appropriate power rail."
+                    ),
+                    "report_context": {
+                        "section": "Signal Integrity",
+                        "impact": "I2C bus will not function without pull-ups",
+                        "standard_ref": "I2C specification",
+                    },
+                    "provenance": make_provenance("i2c_pullup", "heuristic", ic_refs),
+                })
 
     # 5. Reset pin configuration
     for ic in unique_ics:
@@ -3767,6 +3797,74 @@ def detect_design_observations(ctx: AnalysisContext, results: dict) -> list[dict
                 "provenance": make_provenance("obs_topology", "heuristic", [xtal["reference"]]),
             })
 
+        # XL-001: Warn when load caps don't match crystal spec
+        status = xtal.get("load_cap_status")
+        if status in ("marginal", "out_of_spec"):
+            eff = xtal.get("effective_load_pF", 0)
+            target = xtal.get("target_load_pF", 0)
+            error = xtal.get("load_cap_error_pct", 0)
+            sev = "warning" if status == "out_of_spec" else "info"
+            cap_refs = [lc["ref"] for lc in xtal.get("load_caps", [])]
+            design_observations.append({
+                "category": "timing",
+                "component": xtal["reference"],
+                "detector": "detect_design_observations",
+                "rule_id": "XL-001",
+                "severity": sev,
+                "confidence": "heuristic",
+                "evidence_source": "datasheet",
+                "summary": (
+                    f"Crystal {xtal['reference']} load cap mismatch: "
+                    f"{eff}pF vs {target}pF target ({error:+.0f}%)"
+                ),
+                "description": (
+                    f"Effective load capacitance {eff}pF deviates {abs(error):.0f}% "
+                    f"from crystal spec of {target}pF. Incorrect load caps cause "
+                    f"frequency error and potential startup failure."
+                ),
+                "components": [xtal["reference"]] + cap_refs,
+                "nets": [],
+                "pins": [],
+                "recommendation": (
+                    f"Adjust load caps to achieve ~{target}pF effective load. "
+                    f"Formula: C_load = (C1*C2)/(C1+C2) + C_stray (~3pF)."
+                ),
+                "report_context": {
+                    "section": "Timing",
+                    "impact": "Clock accuracy / startup reliability",
+                    "standard_ref": "",
+                },
+                "provenance": make_provenance("xtal_load_cap", "heuristic",
+                                              [xtal["reference"]] + cap_refs),
+            })
+        elif not xtal.get("load_caps"):
+            design_observations.append({
+                "category": "timing",
+                "component": xtal["reference"],
+                "detector": "detect_design_observations",
+                "rule_id": "XL-001",
+                "severity": "warning",
+                "confidence": "heuristic",
+                "evidence_source": "topology",
+                "summary": f"Crystal {xtal['reference']} has no load capacitors",
+                "description": (
+                    f"Crystal {xtal['reference']} has no detectable load capacitors. "
+                    f"Most passive crystals require external load caps for correct "
+                    f"oscillation frequency."
+                ),
+                "components": [xtal["reference"]],
+                "nets": [],
+                "pins": [],
+                "recommendation": "Add load capacitors per crystal datasheet.",
+                "report_context": {
+                    "section": "Timing",
+                    "impact": "Clock accuracy / startup reliability",
+                    "standard_ref": "",
+                },
+                "provenance": make_provenance("xtal_load_cap", "heuristic",
+                                              [xtal["reference"]]),
+            })
+
     # 10. Decoupling frequency coverage per rail
     for decoup in results.get("decoupling_analysis", []):
         caps = decoup.get("capacitors", [])
@@ -3796,6 +3894,96 @@ def detect_design_observations(ctx: AnalysisContext, results: dict) -> list[dict
             "report_context": {"section": "Design Observations", "impact": "", "standard_ref": ""},
             "provenance": make_provenance("obs_topology", "heuristic", [c["ref"] for c in caps]),
         })
+
+    # 11. DC-001: Per-IC decoupling adequacy against datasheet requirements
+    _IC_BYPASS_REQUIREMENTS = {
+        "ESP32": (2, 10.0, "ESP32 datasheet: 2x100nF + 10uF bulk"),
+        "STM32": (1, 4.7, "ST AN4488: 100nF per VDD + 4.7uF bulk"),
+        "NRF52": (1, 4.7, "nRF52 datasheet: 100nF per VDD + 4.7uF bulk"),
+        "SPH0641": (1, 0.1, "MEMS mic: 100nF minimum bypass on VDD"),
+        "ICS-4343": (1, 0.1, "MEMS mic: 100nF minimum bypass on VDD"),
+        "ICS-43434": (1, 0.1, "MEMS mic: 100nF minimum bypass on VDD"),
+        "INMP441": (1, 0.1, "MEMS mic: 100nF minimum bypass on VDD"),
+        "CP2102": (1, 4.7, "USB-UART bridge: 100nF + 4.7uF"),
+        "CH340": (1, 0.1, "USB-UART bridge: 100nF bypass"),
+        "ATECC608": (1, 0.1, "Crypto IC: 100nF bypass on VCC"),
+        "W25Q": (1, 0.1, "SPI flash: 100nF bypass on VCC"),
+    }
+    # Build map: ref -> set of rails where this ref is a regulator output
+    reg_output_map: dict[str, set[str]] = {}
+    for reg in results.get("power_regulators", []):
+        r = reg.get("ref", "")
+        rail = reg.get("output_rail", "")
+        if r and rail:
+            reg_output_map.setdefault(r, set()).add(rail)
+
+    decoupling_by_rail = {d["rail"]: d for d in results.get("decoupling_analysis", [])}
+
+    all_regulator_refs = {reg.get("ref") for reg in results.get("power_regulators", [])}
+
+    for ic in unique_ics:
+        ref = ic["reference"]
+        if ref in all_regulator_refs:
+            continue
+        mpn = (ic.get("mpn") or ic.get("value") or "").upper()
+        req = None
+        for prefix, spec in _IC_BYPASS_REQUIREMENTS.items():
+            if prefix.upper() in mpn:
+                req = spec
+                break
+        if not req:
+            continue
+
+        min_100nf, min_bulk_uf, note = req
+        for net, _ in ctx.ref_pins.get(ref, {}).values():
+            if not net or not ctx.is_power_net(net) or ctx.is_ground(net):
+                continue
+            # Skip rails where this IC is the regulator output
+            if net in reg_output_map.get(ref, set()):
+                continue
+
+            decoup = decoupling_by_rail.get(net)
+            if not decoup:
+                bypass_count = 0
+                total_bulk = 0.0
+            else:
+                caps_on_rail = decoup.get("capacitors", [])
+                bypass_count = sum(1 for c in caps_on_rail if 47e-9 <= c.get("farads", 0) <= 220e-9)
+                total_bulk = sum(c.get("farads", 0) for c in caps_on_rail if c.get("farads", 0) >= 1e-6) * 1e6
+
+            needs_warning = bypass_count < min_100nf or total_bulk < min_bulk_uf
+            if needs_warning:
+                parts = []
+                if bypass_count < min_100nf:
+                    parts.append(f"{min_100nf}x100nF bypass (found {bypass_count})")
+                if total_bulk < min_bulk_uf:
+                    parts.append(f"{min_bulk_uf}uF bulk (found {total_bulk:.1f}uF)")
+                design_observations.append({
+                    "category": "decoupling_adequacy",
+                    "component": ref,
+                    "rail": net,
+                    "detector": "detect_design_observations",
+                    "rule_id": "DC-001",
+                    "severity": "warning",
+                    "confidence": "heuristic",
+                    "evidence_source": "datasheet",
+                    "summary": f"Rail {net}: insufficient decoupling for {ref}",
+                    "description": (
+                        f"{ic.get('value', mpn)} on {net} needs {', '.join(parts)}. "
+                        f"Source: {note}"
+                    ),
+                    "components": [ref],
+                    "nets": [net],
+                    "pins": [],
+                    "recommendation": note,
+                    "report_context": {
+                        "section": "Decoupling",
+                        "impact": "Power integrity / stability",
+                        "standard_ref": "",
+                    },
+                    "provenance": make_provenance("ic_bypass_req", "heuristic", [ref]),
+                })
+                break  # one finding per IC, not per pin
 
     return design_observations
 
