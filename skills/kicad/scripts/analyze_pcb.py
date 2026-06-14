@@ -3489,10 +3489,15 @@ def analyze_placement(footprints: list[dict], outline: dict) -> dict:
                 # board edge to expose the antenna to free space (WROOM-1 etc.).
                 # Downgrade the edge-clearance finding to info with a note.
                 is_rf = _is_rf_module(fp)
+                # Connectors (J-prefix) are intentionally edge-mounted
+                is_connector = fp.get("reference", "").startswith("J")
                 if is_rf:
                     severity = 'info'
                     rf_suffix = (' (RF module antenna at board edge — '
                                  'verify antenna clearance, not a body collision)')
+                elif is_connector:
+                    severity = 'info'
+                    rf_suffix = ' (connector — edge-mounting is intentional)'
                 elif clearance < 0.5:
                     severity = 'error'
                     rf_suffix = ''
@@ -5736,7 +5741,7 @@ def analyze_via_in_pad(footprints: list[dict], vias: dict, thermal_pad_refs: set
         return findings
 
     # Build SMD pad bboxes (excluding thermal pads already covered by TV-001)
-    smd_pads: list[tuple[str, str, str, float, float, float, float]] = []
+    smd_pads: list[tuple[str, str, str, int, float, float, float, float]] = []
     for fp in footprints:
         ref = fp.get("reference", "")
         if ref in thermal_pad_refs:
@@ -5754,6 +5759,7 @@ def analyze_via_in_pad(footprints: list[dict], vias: dict, thermal_pad_refs: set
                 continue
             pad_num = pad.get("number", "?")
             smd_pads.append((ref, pad_num, pad.get("net_name", ""),
+                             pad.get("net_number", -1),
                              px - hw, py - hh, px + hw, py + hh))
 
     for via in via_list:
@@ -5761,8 +5767,12 @@ def analyze_via_in_pad(footprints: list[dict], vias: dict, thermal_pad_refs: set
         vy = via.get("y")
         if vx is None or vy is None:
             continue
-        for ref, pad_num, net, x1, y1, x2, y2 in smd_pads:
+        via_net_id = via.get("net", -2)
+        for ref, pad_num, net_name, net_id, x1, y1, x2, y2 in smd_pads:
             if x1 <= vx <= x2 and y1 <= vy <= y2:
+                # GND stitching vias in GND pads are intentional — skip
+                if via_net_id == net_id and net_name and is_ground_name(net_name):
+                    break
                 # Check tenting
                 via_layers = via.get("layers", [])
                 # A via is tented if it has solder mask coverage (heuristic: look for F.Mask/B.Mask)
@@ -5784,7 +5794,7 @@ def analyze_via_in_pad(footprints: list[dict], vias: dict, thermal_pad_refs: set
                     "summary": f"Via in pad: {ref}:{pad_num} ({'tented' if tented else 'untented'})",
                     "description": f"Via at ({round(vx, 2)}, {round(vy, 2)}) inside SMD pad {ref}:{pad_num}. {'Tented.' if tented else 'Not tented — solder may wick through.'}",
                     "components": [ref],
-                    "nets": [net] if net else [],
+                    "nets": [net_name] if net_name else [],
                     "pins": [],
                     "recommendation": "" if tented else f"Fill and cap via in {ref}:{pad_num} or tent with solder mask.",
                     "report_context": {"section": "DFM", "impact": "Solder wicking risk" if not tented else "", "standard_ref": ""},
